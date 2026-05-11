@@ -14,7 +14,13 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import CONF_MONITORED_SITES, CONF_PV_GRID_DATA, CONF_UPDATE_INTERVAL, DOMAIN
+from .const import (
+    CONF_DEVICE_SN,
+    CONF_MONITORED_SITES,
+    CONF_PV_GRID_DATA,
+    CONF_UPDATE_INTERVAL,
+    DOMAIN,
+)
 from .esolar import get_esolar_data
 
 _LOGGER = logging.getLogger(__name__)
@@ -439,8 +445,7 @@ class ESolarCoordinator(DataUpdateCoordinator[ESolarResponse]):
             hass,
             _LOGGER,
             name=DOMAIN,
-            update_interval=timedelta(minutes=CONF_UPDATE_INTERVAL),
-            # update_interval=timedelta(seconds=20),
+            update_interval=timedelta(seconds=CONF_UPDATE_INTERVAL),
         )
         self._entry = entry
         self.temp = 3
@@ -488,6 +493,7 @@ def get_data(
     username = config.get(CONF_USERNAME)
     password = config.get(CONF_PASSWORD)
     region = config.get(CONF_REGION)
+    device_sn = config.get(CONF_DEVICE_SN)
     plants = options.get(CONF_MONITORED_SITES)
     use_pv_grid_attributes = options.get(CONF_PV_GRID_DATA)
 
@@ -498,7 +504,14 @@ def get_data(
             plants,
             use_pv_grid_attributes,
         )
-        plant_info = get_esolar_data(region, username, password, plants, use_pv_grid_attributes)
+        plant_info = get_esolar_data(
+            region,
+            username,
+            password,
+            plants,
+            use_pv_grid_attributes,
+            device_sn=device_sn,
+        )
 
     except requests.exceptions.HTTPError as errh:
         raise requests.exceptions.HTTPError(errh)

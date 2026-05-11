@@ -4,7 +4,8 @@
       "user": {
         "data": {
           "username": "Användarnamn",
-          "password": "Lösenord"
+          "password": "Lösenord",
+          "device_sn": "Enhetens serienummer"
         },
         "description": "Ange namn och lösen till ditt SAJ eSolar konto",
         "title":"SAJ eSolar"

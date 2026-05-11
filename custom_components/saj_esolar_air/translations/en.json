@@ -4,7 +4,8 @@
       "user": {
         "data": {
           "username": "Username",
-          "password": "Password"
+          "password": "Password",
+          "device_sn": "Device serial number"
         },
         "description": "Please enter the username and password for your SAJ eSolar account",
         "title":"SAJ eSolar"

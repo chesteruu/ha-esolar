@@ -139,6 +139,15 @@ async def async_setup_entry(
             entities.append(
                 ESolarSensorPlant(coordinator, plant["plantname"], plant["plantuid"])
             )
+            _LOGGER.debug(
+                "Setting up ESolarSensorPlantHomeLoadPower sensor for %s",
+                plant["plantname"],
+            )
+            entities.append(
+                ESolarSensorPlantHomeLoadPower(
+                    coordinator, plant["plantname"], plant["plantuid"]
+                )
+            )
             if plant["type"] == 0:
                 _LOGGER.debug(
                     "Setting up ESolarSensorPlantTotalEnergy sensor for %s",
@@ -192,6 +201,24 @@ async def async_setup_entry(
                 )
                 entities.append(
                     ESolarSensorPlantBatterySoC(
+                        coordinator, plant["plantname"], plant["plantuid"]
+                    )
+                )
+                _LOGGER.debug(
+                    "Setting up ESolarSensorPlantBatteryChargePower sensor for %s",
+                    plant["plantname"],
+                )
+                entities.append(
+                    ESolarSensorPlantBatteryChargePower(
+                        coordinator, plant["plantname"], plant["plantuid"]
+                    )
+                )
+                _LOGGER.debug(
+                    "Setting up ESolarSensorPlantBatteryDischargePower sensor for %s",
+                    plant["plantname"],
+                )
+                entities.append(
+                    ESolarSensorPlantBatteryDischargePower(
                         coordinator, plant["plantname"], plant["plantuid"]
                     )
                 )
@@ -335,6 +362,7 @@ class ESolarSensorPlant(ESolarSensor):
     @property
     def native_value(self) -> str | None:
         """Return sensor state."""
+        value = None
         for plant in self._coordinator.data["plantList"]:
             if plant["plantname"] == self._plant_name:
                 # Setup dynamic attributes
@@ -351,6 +379,25 @@ class ESolarSensorPlant(ESolarSensor):
                     "totalPlantTreeNum"
                 ]
                 self._attr_extra_state_attributes[P_TOTAL_E] = plant["totalElectricity"]
+                self._attr_extra_state_attributes[P_CURRENT_POWER] = plant["nowPower"]
+
+                # Remove old runtime fields before adding the latest telemetry keys.
+                for attr_key in list(self._attr_extra_state_attributes):
+                    if attr_key.startswith("Runtime ") or attr_key.startswith("Device "):
+                        self._attr_extra_state_attributes.pop(attr_key)
+
+                # Expose all raw SAJ runtime fields from the live device payload.
+                raw_stats = plant.get("_raw_device_statistics", {})
+                if isinstance(raw_stats, dict):
+                    for key, raw_value in raw_stats.items():
+                        self._attr_extra_state_attributes[f"Runtime {key}"] = raw_value
+
+                raw_device = plant.get("_raw_device_data", {})
+                if isinstance(raw_device, dict):
+                    for key, raw_value in raw_device.items():
+                        if key == "deviceStatisticsData":
+                            continue
+                        self._attr_extra_state_attributes[f"Device {key}"] = raw_value
 
                 # Setup state
                 if plant["runningState"] == 1:
@@ -410,6 +457,7 @@ class ESolarSensorPlantTotalEnergy(ESolarSensor):
     @property
     def native_value(self) -> float | None:
         """Return sensor state."""
+        value = None
         for plant in self._coordinator.data["plantList"]:
             if plant["plantname"] == self._plant_name:
                 # Setup dynamic attributes
@@ -432,6 +480,70 @@ class ESolarSensorPlantTotalEnergy(ESolarSensor):
                 value = float(plant["totalElectricity"])
 
         return value
+
+
+class ESolarSensorPlantHomeLoadPower(ESolarSensor):
+    """Representation of a eSolar sensor for plant home load power."""
+
+    def __init__(self, coordinator: ESolarCoordinator, plant_name, plant_uid) -> None:
+        """Initialize the sensor."""
+        super().__init__(
+            coordinator=coordinator, plant_name=plant_name, plant_uid=plant_uid
+        )
+        self._last_updated: datetime.datetime | None = None
+        self._attr_available = False
+        self._attr_unique_id = f"plantUid_power_home_load_{plant_uid}"
+        self._device_name = plant_name
+        self._device_model = PLANT_MODEL
+        self._attr_icon = ICON_POWER
+        self._attr_name = f"Plant {self._plant_name} Home Load Power"
+        self._attr_native_unit_of_measurement = UnitOfPower.WATT
+        self._attr_device_class = SensorDeviceClass.POWER
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_extra_state_attributes = {
+            P_NAME: None,
+            P_UID: None,
+            B_H_LOAD: None,
+            B_T_LOAD: None,
+            B_B_LOAD: None,
+        }
+
+    def _get_home_load(self) -> float:
+        home_load = 0.0
+        total_load = 0.0
+        backup_load = 0.0
+        for plant in self._coordinator.data["plantList"]:
+            if plant["plantname"] != self._plant_name:
+                continue
+            self._attr_extra_state_attributes[P_NAME] = plant["plantname"]
+            self._attr_extra_state_attributes[P_UID] = plant["plantuid"]
+            kits = plant.get("kitList") or []
+            for kit in kits:
+                if kit.get("onLineStr") != "1":
+                    continue
+                store = kit.get("storeDevicePower") or {}
+                home_load += float(store.get("homeLoadPower", 0.0) or 0.0)
+                total_load += float(store.get("totalLoadPower", 0.0) or 0.0)
+                backup_load += float(store.get("backupLoadPower", 0.0) or 0.0)
+            # For single-device adapter path where kit list may be empty.
+            if not kits:
+                raw_stats = plant.get("_raw_device_statistics") or {}
+                home_load = float(raw_stats.get("totalLoadPowerwatt", 0.0) or 0.0)
+
+        self._attr_extra_state_attributes[B_H_LOAD] = home_load
+        self._attr_extra_state_attributes[B_T_LOAD] = total_load
+        self._attr_extra_state_attributes[B_B_LOAD] = backup_load
+        return home_load
+
+    async def async_update(self) -> None:
+        """Get latest state."""
+        self._attr_available = True
+        self._attr_native_value = self._get_home_load()
+
+    @property
+    def native_value(self) -> float | None:
+        """Return sensor state."""
+        return self._get_home_load()
 
 
 class ESolarSensorPlantBatteryBuyEnergy(ESolarSensor):
@@ -479,6 +591,7 @@ class ESolarSensorPlantBatteryBuyEnergy(ESolarSensor):
     @property
     def native_value(self) -> float | None:
         """Return sensor state."""
+        value = None
         for plant in self._coordinator.data["plantList"]:
             if plant["plantname"] == self._plant_name:
                 # Setup state
@@ -533,6 +646,7 @@ class ESolarSensorPlantBatterySellEnergy(ESolarSensor):
     @property
     def native_value(self) -> float | None:
         """Return sensor state."""
+        value = None
         for plant in self._coordinator.data["plantList"]:
             if plant["plantname"] == self._plant_name:
                 # Setup state
@@ -588,6 +702,7 @@ class ESolarSensorPlantBatteryChargeEnergy(ESolarSensor):
     @property
     def native_value(self) -> float | None:
         """Return sensor state."""
+        value = None
         for plant in self._coordinator.data["plantList"]:
             if plant["plantname"] == self._plant_name:
                 # Setup state
@@ -646,6 +761,7 @@ class ESolarSensorPlantBatteryDischargeEnergy(ESolarSensor):
     @property
     def native_value(self) -> float | None:
         """Return sensor state."""
+        value = None
         for plant in self._coordinator.data["plantList"]:
             if plant["plantname"] == self._plant_name:
                 # Setup state
@@ -714,6 +830,7 @@ class ESolarSensorPlantBatterySoC(ESolarSensor):
     @property
     def native_value(self) -> float | None:
         """Return sensor state."""
+        value = None
         installed_power = float(0)
         available_power = float(0)
         for plant in self._coordinator.data["plantList"]:
@@ -736,6 +853,106 @@ class ESolarSensorPlantBatterySoC(ESolarSensor):
                 value = None
 
         return value
+
+
+class ESolarSensorPlantBatteryChargePower(ESolarSensor):
+    """Instant battery charging power for a plant."""
+
+    def __init__(self, coordinator: ESolarCoordinator, plant_name, plant_uid) -> None:
+        super().__init__(
+            coordinator=coordinator, plant_name=plant_name, plant_uid=plant_uid
+        )
+        self._attr_unique_id = f"plantUid_power_battery_charge_{plant_uid}"
+        self._device_name = plant_name
+        self._device_model = PLANT_MODEL
+        self._attr_icon = ICON_POWER
+        self._attr_name = f"Plant {self._plant_name} Battery Charge Power"
+        self._attr_native_unit_of_measurement = UnitOfPower.WATT
+        self._attr_device_class = SensorDeviceClass.POWER
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_extra_state_attributes = {
+            P_NAME: None,
+            P_UID: None,
+        }
+
+    def _get_value(self) -> float:
+        charge_power = 0.0
+        for plant in self._coordinator.data["plantList"]:
+            if plant["plantname"] != self._plant_name:
+                continue
+            self._attr_extra_state_attributes[P_NAME] = plant["plantname"]
+            self._attr_extra_state_attributes[P_UID] = plant["plantuid"]
+            if "kitList" not in plant or plant["kitList"] is None:
+                continue
+            for kit in plant["kitList"]:
+                if kit.get("onLineStr") != "1":
+                    continue
+                store_power = kit.get("storeDevicePower", {})
+                battery_power = float(store_power.get("batteryPower", 0.0) or 0.0)
+                battery_direction = int(store_power.get("batteryDirection", 0) or 0)
+                if battery_direction == -1:
+                    charge_power += abs(battery_power)
+                elif battery_direction == 0 and battery_power < 0:
+                    charge_power += abs(battery_power)
+        return charge_power
+
+    async def async_update(self) -> None:
+        self._attr_available = True
+        self._attr_native_value = self._get_value()
+
+    @property
+    def native_value(self) -> float | None:
+        return self._get_value()
+
+
+class ESolarSensorPlantBatteryDischargePower(ESolarSensor):
+    """Instant battery discharging power for a plant."""
+
+    def __init__(self, coordinator: ESolarCoordinator, plant_name, plant_uid) -> None:
+        super().__init__(
+            coordinator=coordinator, plant_name=plant_name, plant_uid=plant_uid
+        )
+        self._attr_unique_id = f"plantUid_power_battery_discharge_{plant_uid}"
+        self._device_name = plant_name
+        self._device_model = PLANT_MODEL
+        self._attr_icon = ICON_POWER
+        self._attr_name = f"Plant {self._plant_name} Battery Discharge Power"
+        self._attr_native_unit_of_measurement = UnitOfPower.WATT
+        self._attr_device_class = SensorDeviceClass.POWER
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_extra_state_attributes = {
+            P_NAME: None,
+            P_UID: None,
+        }
+
+    def _get_value(self) -> float:
+        discharge_power = 0.0
+        for plant in self._coordinator.data["plantList"]:
+            if plant["plantname"] != self._plant_name:
+                continue
+            self._attr_extra_state_attributes[P_NAME] = plant["plantname"]
+            self._attr_extra_state_attributes[P_UID] = plant["plantuid"]
+            if "kitList" not in plant or plant["kitList"] is None:
+                continue
+            for kit in plant["kitList"]:
+                if kit.get("onLineStr") != "1":
+                    continue
+                store_power = kit.get("storeDevicePower", {})
+                battery_power = float(store_power.get("batteryPower", 0.0) or 0.0)
+                battery_direction = int(store_power.get("batteryDirection", 0) or 0)
+                if battery_direction == 1:
+                    discharge_power += abs(battery_power)
+                elif battery_direction == 0 and battery_power > 0:
+                    discharge_power += abs(battery_power)
+        return discharge_power
+
+    async def async_update(self) -> None:
+        self._attr_available = True
+        self._attr_native_value = self._get_value()
+
+    @property
+    def native_value(self) -> float | None:
+        return self._get_value()
 
 
 class ESolarInverterEnergyTotal(ESolarSensor):

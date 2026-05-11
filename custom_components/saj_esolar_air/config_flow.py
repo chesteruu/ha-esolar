@@ -15,12 +15,13 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 
 from .const import (
+    CONF_DEVICE_SN,
     CONF_INVERTER_SENSORS,
     CONF_MONITORED_SITES,
     CONF_PV_GRID_DATA,
     DOMAIN,
 )
-from .esolar import esolar_web_autenticate, web_get_plant
+from .esolar import get_esolar_data
 
 CONF_TITLE = "SAJ eSolar"
 
@@ -31,6 +32,7 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
         vol.Required(CONF_REGION, default="eu"): vol.In(["eu","in"]),
         vol.Required(CONF_USERNAME): str,
         vol.Required(CONF_PASSWORD): str,
+        vol.Required(CONF_DEVICE_SN): str,
     }
 )
 
@@ -42,11 +44,24 @@ class ESolarHub:
         """Initialize."""
         self.plant_list: dict[str, Any] = {}
 
-    def auth_and_get_solar_plants(self, region: str, username: str, password: str) -> bool:
+    def auth_and_get_solar_plants(
+        self,
+        region: str,
+        username: str,
+        password: str,
+        device_sn: str,
+    ) -> bool:
         """Download and list availablse inverters."""
         try:
-            session = esolar_web_autenticate(region, username, password)
-            self.plant_list = web_get_plant(region, session).get("plantList")
+            result = get_esolar_data(
+                region,
+                username,
+                password,
+                plant_list=None,
+                use_pv_grid_attributes=False,
+                device_sn=device_sn,
+            )
+            self.plant_list = result.get("plantList", [])
         except requests.exceptions.HTTPError:
             _LOGGER.error("Login: HTTPError")
             return False
@@ -59,6 +74,13 @@ class ESolarHub:
         except requests.exceptions.RequestException:
             _LOGGER.error("Login: RequestException")
             return False
+        except ValueError as err:
+            # SAJ API returns business/auth errors in payload; treat as invalid auth.
+            _LOGGER.error("Login: ValueError: %s", err)
+            return False
+        except Exception as err:  # pylint: disable=broad-except
+            _LOGGER.exception("Login: unexpected error: %s", err)
+            return False
         return True
 
 
@@ -70,7 +92,8 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
         hub.auth_and_get_solar_plants,
         data[CONF_REGION],
         data[CONF_USERNAME],
-        data[CONF_PASSWORD]
+        data[CONF_PASSWORD],
+        data[CONF_DEVICE_SN],
     ):
         raise InvalidAuth
     return {"plant_list": hub.plant_list}
@@ -169,7 +192,24 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         """Initialize options flow."""
-        self.config_entry = config_entry
+        self._entry = config_entry
+
+    def _monitored_sites(self) -> list[str]:
+        """Return monitored sites with backwards-compatible fallbacks."""
+        sites = self._entry.options.get(CONF_MONITORED_SITES)
+        if sites is None:
+            # Older entries may not have options populated yet.
+            sites = self._entry.data.get(CONF_MONITORED_SITES, [])
+        if isinstance(sites, list):
+            return sites
+        return []
+
+    def _opt_bool(self, key: str, default: bool = False) -> bool:
+        """Return option bool with safe fallback for legacy entries."""
+        value = self._entry.options.get(key, default)
+        if value is None:
+            return default
+        return bool(value)
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -178,9 +218,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         if user_input is not None:
             user_input.update(
                 {
-                    CONF_MONITORED_SITES: self.config_entry.options.get(
-                        CONF_MONITORED_SITES
-                    )
+                    CONF_MONITORED_SITES: self._monitored_sites()
                 }
             )
             return self.async_create_entry(title=CONF_TITLE, data=user_input)
@@ -191,11 +229,11 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 {
                     vol.Required(
                         CONF_INVERTER_SENSORS,
-                        default=self.config_entry.options.get(CONF_INVERTER_SENSORS),
+                        default=self._opt_bool(CONF_INVERTER_SENSORS, False),
                     ): bool,
                     vol.Required(
                         CONF_PV_GRID_DATA,
-                        default=self.config_entry.options.get(CONF_PV_GRID_DATA),
+                        default=self._opt_bool(CONF_PV_GRID_DATA, False),
                     ): bool,
                 }
             ),
