@@ -329,8 +329,11 @@ def _map_v2_to_statistics(detail: dict, battery: dict, plant_meta: dict | None =
     today = _num(detail.get("todayEnergy"), 0.0) or 0.0
     month = _num(detail.get("monthEnergy"), 0.0) or 0.0
     total = _num(detail.get("totalEnergy"), 0.0) or 0.0
-    grid_power = _num(detail.get("gridPower"), 0.0) or 0.0
-    load_power = _num(detail.get("loadPower"), 0.0) or 0.0
+    # SAJ v2 often omits grid/load power (returns null). Keep them None so the
+    # plant builder can derive them from the energy balance instead of showing
+    # a bogus 0 W.
+    grid_power = _num(detail.get("gridPower"))
+    load_power = _num(detail.get("loadPower"))
     bat_power = _num(detail.get("batteryPower"), 0.0) or 0.0
     bat_soc = _num(detail.get("batterySoc"))
     if bat_soc is None:
@@ -373,16 +376,18 @@ def _build_plant_info_from_device(device_sn: str, device_data: dict) -> dict:
 
     pv_power = _to_float(stats.get("powerNow"))
     load_data = stats.get("loadData", {}) if isinstance(stats.get("loadData"), dict) else {}
-    load_power = _to_float(
-        stats.get("totalLoadPowerwatt"),
-        _to_float(load_data.get("systotalloadwatt"), 0.0),
-    )
-    home_load_power = _to_float(
-        stats.get("homeLoadPowerwatt"),
-        _to_float(stats.get("homeLoadPower"), load_power),
-    )
+    # Preserve None here: SAJ v2 commonly returns null load/grid, and we need to
+    # tell "reported as 0" apart from "not reported" so we can derive values.
+    raw_total_load = stats.get("totalLoadPowerwatt")
+    if raw_total_load is None:
+        raw_total_load = load_data.get("systotalloadwatt")
+    load_power = _to_float(raw_total_load, None)
+    raw_home_load = stats.get("homeLoadPowerwatt")
+    if raw_home_load is None:
+        raw_home_load = stats.get("homeLoadPower")
+    home_load_power = _to_float(raw_home_load, None)
     backup_load_power = _to_float(stats.get("backUptotalLoadPowerwatt"), 0.0)
-    grid_power = _to_float(stats.get("sysGridPowerwatt"))
+    grid_power = _to_float(stats.get("sysGridPowerwatt"), None)
     bat_power = _to_float(stats.get("batPower"))
     bat_soc = _to_float(stats.get("batCapcity"))
     today_pv_energy = _to_float(stats.get("todayPvEnergy"))
@@ -425,11 +430,42 @@ def _build_plant_info_from_device(device_sn: str, device_data: dict) -> dict:
     elif grid_power > 0:
         grid_direction = -1
 
+    # SAJ v2 reports `batteryPower` as an unsigned magnitude; the direction is
+    # carried by `batteryStatus` (1/3 = charging, 2 = discharging).  Falling
+    # back to the sign of bat_power only when the status is unavailable.
+    battery_status = stats.get("batteryStatus")
     battery_direction = 0
-    if bat_power > 0:
+    try:
+        bstat = int(battery_status) if battery_status is not None else None
+    except (TypeError, ValueError):
+        bstat = None
+    if bstat == 2:
+        battery_direction = 1        # discharging
+    elif bstat in (1, 3):
+        battery_direction = -1       # charging
+    elif bat_power > 0:
         battery_direction = -1
     elif bat_power < 0:
         battery_direction = 1
+
+    # SAJ v2 omits grid/load power (null). Derive them from the energy balance
+    # so the power-flow card and load sensors stay truthful:
+    #   load = pv + battery_charge - battery_discharge + grid_import - grid_export
+    # With the sensor sign convention: battery_direction -1 = charging,
+    # 1 = discharging, so signed battery power = -bat_power for charging and
+    # +bat_power for discharging.
+    signed_battery_power = 0.0
+    if battery_direction == 1:
+        signed_battery_power = abs(bat_power)
+    elif battery_direction == -1:
+        signed_battery_power = -abs(bat_power)
+    if load_power is None:
+        if grid_power is not None:
+            load_power = pv_power + signed_battery_power + grid_power
+        else:
+            load_power = pv_power + signed_battery_power
+    if home_load_power is None:
+        home_load_power = load_power
 
     # Keep existing sensor model by synthesizing expected keys.
     system_power = _to_float(plant_meta.get("systemPower"), max(pv_power, 0.0))
