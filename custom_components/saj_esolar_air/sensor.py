@@ -140,6 +140,33 @@ async def async_setup_entry(
                 ESolarSensorPlant(coordinator, plant["plantname"], plant["plantuid"])
             )
             _LOGGER.debug(
+                "Setting up ESolarSensorPlantPvPower sensor for %s",
+                plant["plantname"],
+            )
+            entities.append(
+                ESolarSensorPlantPvPower(
+                    coordinator, plant["plantname"], plant["plantuid"]
+                )
+            )
+            _LOGGER.debug(
+                "Setting up ESolarSensorPlantGridPower sensor for %s",
+                plant["plantname"],
+            )
+            entities.append(
+                ESolarSensorPlantGridPower(
+                    coordinator, plant["plantname"], plant["plantuid"]
+                )
+            )
+            _LOGGER.debug(
+                "Setting up ESolarSensorPlantTodayEnergy sensor for %s",
+                plant["plantname"],
+            )
+            entities.append(
+                ESolarSensorPlantTodayEnergy(
+                    coordinator, plant["plantname"], plant["plantuid"]
+                )
+            )
+            _LOGGER.debug(
                 "Setting up ESolarSensorPlantHomeLoadPower sensor for %s",
                 plant["plantname"],
             )
@@ -480,6 +507,146 @@ class ESolarSensorPlantTotalEnergy(ESolarSensor):
                 value = float(plant["totalElectricity"])
 
         return value
+
+
+class ESolarSensorPlantPvPower(ESolarSensor):
+    """Representation of the live PV (solar) power produced by the plant."""
+
+    def __init__(self, coordinator: ESolarCoordinator, plant_name, plant_uid) -> None:
+        """Initialize the sensor."""
+        super().__init__(
+            coordinator=coordinator, plant_name=plant_name, plant_uid=plant_uid
+        )
+        self._last_updated: datetime.datetime | None = None
+        self._attr_available = False
+        self._attr_unique_id = f"plantUid_power_pv_{plant_uid}"
+        self._device_name = plant_name
+        self._device_model = PLANT_MODEL
+        self._attr_icon = ICON_POWER
+        self._attr_name = f"Plant {self._plant_name} PV Power"
+        self._attr_native_unit_of_measurement = UnitOfPower.WATT
+        self._attr_device_class = SensorDeviceClass.POWER
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_extra_state_attributes = {
+            P_NAME: None,
+            P_UID: None,
+            P_CURRENT_POWER: None,
+        }
+
+    def _get_pv_power(self) -> float | None:
+        for plant in self._coordinator.data["plantList"]:
+            if plant["plantname"] != self._plant_name:
+                continue
+            self._attr_extra_state_attributes[P_NAME] = plant["plantname"]
+            self._attr_extra_state_attributes[P_UID] = plant["plantuid"]
+            power = plant.get("nowPower")
+            self._attr_extra_state_attributes[P_CURRENT_POWER] = power
+            return float(power) if power is not None else None
+        return None
+
+    async def async_update(self) -> None:
+        """Get latest state."""
+        self._attr_available = True
+        self._attr_native_value = self._get_pv_power()
+
+    @property
+    def native_value(self) -> float | None:
+        """Return sensor state."""
+        return self._get_pv_power()
+
+
+class ESolarSensorPlantGridPower(ESolarSensor):
+    """Representation of the grid power for the plant."""
+
+    def __init__(self, coordinator: ESolarCoordinator, plant_name, plant_uid) -> None:
+        """Initialize the sensor."""
+        super().__init__(
+            coordinator=coordinator, plant_name=plant_name, plant_uid=plant_uid
+        )
+        self._last_updated: datetime.datetime | None = None
+        self._attr_available = False
+        self._attr_unique_id = f"plantUid_power_grid_{plant_uid}"
+        self._device_name = plant_name
+        self._device_model = PLANT_MODEL
+        self._attr_icon = ICON_POWER
+        self._attr_name = f"Plant {self._plant_name} Grid Power"
+        self._attr_native_unit_of_measurement = UnitOfPower.WATT
+        self._attr_device_class = SensorDeviceClass.POWER
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_extra_state_attributes = {
+            P_NAME: None,
+            P_UID: None,
+        }
+
+    def _get_grid_power(self) -> float | None:
+        for plant in self._coordinator.data["plantList"]:
+            if plant["plantname"] != self._plant_name:
+                continue
+            self._attr_extra_state_attributes[P_NAME] = plant["plantname"]
+            self._attr_extra_state_attributes[P_UID] = plant["plantuid"]
+            for kit in plant.get("kitList") or []:
+                store = kit.get("storeDevicePower") or {}
+                gp = store.get("gridPower")
+                if gp is not None:
+                    return float(gp)
+            raw_stats = plant.get("_raw_device_statistics") or {}
+            gp = raw_stats.get("sysGridPowerwatt")
+            return float(gp) if gp is not None else None
+        return None
+
+    async def async_update(self) -> None:
+        """Get latest state."""
+        self._attr_available = True
+        self._attr_native_value = self._get_grid_power()
+
+    @property
+    def native_value(self) -> float | None:
+        """Return sensor state."""
+        return self._get_grid_power()
+
+
+class ESolarSensorPlantTodayEnergy(ESolarSensor):
+    """Representation of today's PV energy produced by the plant."""
+
+    def __init__(self, coordinator: ESolarCoordinator, plant_name, plant_uid) -> None:
+        """Initialize the sensor."""
+        super().__init__(
+            coordinator=coordinator, plant_name=plant_name, plant_uid=plant_uid
+        )
+        self._last_updated: datetime.datetime | None = None
+        self._attr_available = False
+        self._attr_unique_id = f"plantUid_energy_today_{plant_uid}"
+        self._device_name = plant_name
+        self._device_model = PLANT_MODEL
+        self._attr_icon = ICON_PANEL
+        self._attr_name = f"Plant {self._plant_name} Today Energy"
+        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+        self._attr_device_class = SensorDeviceClass.ENERGY
+        self._attr_state_class = SensorStateClass.TOTAL_INCREASING
+        self._attr_extra_state_attributes = {
+            P_NAME: None,
+            P_UID: None,
+        }
+
+    def _get_today_energy(self) -> float | None:
+        for plant in self._coordinator.data["plantList"]:
+            if plant["plantname"] != self._plant_name:
+                continue
+            self._attr_extra_state_attributes[P_NAME] = plant["plantname"]
+            self._attr_extra_state_attributes[P_UID] = plant["plantuid"]
+            val = plant.get("todayElectricity")
+            return float(val) if val is not None else None
+        return None
+
+    async def async_update(self) -> None:
+        """Get latest state."""
+        self._attr_available = True
+        self._attr_native_value = self._get_today_energy()
+
+    @property
+    def native_value(self) -> float | None:
+        """Return sensor state."""
+        return self._get_today_energy()
 
 
 class ESolarSensorPlantHomeLoadPower(ESolarSensor):
