@@ -425,9 +425,9 @@ def _build_plant_info_from_device(device_sn: str, device_data: dict) -> dict:
     country = str(device_data.get("countryCode") or plant_meta.get("country") or "")
 
     grid_direction = 0
-    if grid_power < 0:
+    if grid_power is not None and grid_power < 0:
         grid_direction = 1
-    elif grid_power > 0:
+    elif grid_power is not None and grid_power > 0:
         grid_direction = -1
 
     # SAJ v2 reports `batteryPower` as an unsigned magnitude; the direction is
