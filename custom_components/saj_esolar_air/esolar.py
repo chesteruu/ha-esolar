@@ -243,7 +243,7 @@ def web_get_one_device_info(session: ESolarSession, device_sn: str, plant_uid: s
 
     # Normalize into the shape the plant builder + sensors expect.
     device_data = dict(detail)
-    device_data["deviceStatisticsData"] = _map_v2_to_statistics(detail, battery)
+    device_data["deviceStatisticsData"] = _map_v2_to_statistics(detail, battery, plant_meta)
     device_data["deviceSn"] = device_sn
     if plant_meta:
         device_data.setdefault("plantUid", plant_meta.get("plantUid"))
@@ -287,6 +287,28 @@ def _lookup_plant_for_device(
                 break
     if chosen is None:
         chosen = rows[0]
+
+    # Enrich with the detailed single-plant info (battery flag, system power,
+    # running state) which userPlantPage does not include.
+    uid = chosen.get("plantUid") or plant_uid
+    if uid:
+        try:
+            d_resp = _api_post(
+                session,
+                "/dev-api/api/v2/monitor/plant/getOnePlantInfoV2",
+                {"plantUid": uid},
+            )
+            detail_plant = _api_extract_json(d_resp)
+            if isinstance(detail_plant, dict):
+                # userPlantPage row (`chosen`) is authoritative for battery/type
+                # metadata; fill any gaps from getOnePlantInfoV2.
+                merged = dict(chosen)
+                for k, v in detail_plant.items():
+                    if merged.get(k) in (None, "", "-") and v not in (None, "", "-"):
+                        merged[k] = v
+                chosen = merged
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("plant detail lookup failed: %s", err)
     return chosen
 
 
@@ -300,8 +322,9 @@ def _num(value, default=None):
         return default
 
 
-def _map_v2_to_statistics(detail: dict, battery: dict) -> dict:
+def _map_v2_to_statistics(detail: dict, battery: dict, plant_meta: dict | None = None) -> dict:
     """Map v2 `getInverterEnergyDetail` fields onto legacy statistics keys."""
+    plant_meta = plant_meta or {}
     power_now = _num(detail.get("powerNow"), 0.0) or 0.0
     today = _num(detail.get("todayEnergy"), 0.0) or 0.0
     month = _num(detail.get("monthEnergy"), 0.0) or 0.0
@@ -314,9 +337,14 @@ def _map_v2_to_statistics(detail: dict, battery: dict) -> dict:
         bat_soc = _num(battery.get("batterySoc"), 0.0) or 0.0
 
     battery_status = detail.get("batteryStatus")
-    running_state = int(detail.get("runningState") or 0)
-    # SAJ: 4 == offline-ish; treat online when a recent update exists.
-    is_online = 1 if detail.get("updateTime") and battery_status != 4 else 0
+    # Prefer the plant's authoritative runningState (1=online, 3=offline).
+    plant_running = _num(plant_meta.get("runningState"))
+    if plant_running is not None:
+        running_state = int(plant_running)
+        is_online = 1 if running_state == 1 else 0
+    else:
+        running_state = int(detail.get("runningState") or 0)
+        is_online = 1 if detail.get("updateTime") and battery_status != 4 else 0
 
     return {
         "powerNow": power_now,
@@ -362,9 +390,20 @@ def _build_plant_info_from_device(device_sn: str, device_data: dict) -> dict:
 
     is_online = int(stats.get("isOnline", 0) or 0) == 1
     running_state = 1 if is_online else 3
-    has_battery = bat_soc > 0 or abs(bat_power) > 0
-    plant_type = 3 if has_battery else 0
+
+    # Battery detection: SAJ's own plant record is authoritative. When the
+    # plant reports a battery capacity or an energy-storage type name, treat
+    # it as a storage plant even if the instant SOC is 0 (e.g. device offline).
     plant_meta = device_data.get("_plant_meta") or {}
+    battery_capacity = _to_float(plant_meta.get("batCapacity"), 0.0)
+    plant_type_name = str(plant_meta.get("typeName") or "").lower()
+    has_battery = (
+        battery_capacity > 0
+        or "storage" in plant_type_name
+        or bat_soc > 0
+        or abs(bat_power) > 0
+    )
+    plant_type = 3 if has_battery else 0
     plant_uid = str(
         device_data.get("plantuid")
         or device_data.get("plantUid")
@@ -393,11 +432,13 @@ def _build_plant_info_from_device(device_sn: str, device_data: dict) -> dict:
         battery_direction = 1
 
     # Keep existing sensor model by synthesizing expected keys.
+    system_power = _to_float(plant_meta.get("systemPower"), max(pv_power, 0.0))
+    currency = str(plant_meta.get("currencyName") or plant_meta.get("currency") or "EUR")
     plant = {
         "plantuid": plant_uid,
         "plantname": plant_name,
-        "systempower": max(pv_power, 0.0),
-        "currency": "EUR",
+        "systempower": system_power,
+        "currency": currency,
         "type": plant_type,
         "country": country,
         "address": address,
