@@ -38,6 +38,11 @@ CLIENT_ID = "esolar-monitor-admin"
 CLIENT_CODE = "organization"
 APP_PROJECT = "elekeeper"
 APP_SECRET = "b389a704-31f1-463d-8db7-435b18d1311d"
+# SAJ's nginx returns 403 for requests without a browser-like User-Agent.
+USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
 
 
 @dataclass
@@ -97,6 +102,7 @@ def _signing_headers(extra_params: dict | None = None) -> tuple[dict, dict]:
 
     headers = {
         "Content-Type": "application/json;charset=utf-8",
+        "User-Agent": USER_AGENT,
         "X-App-Project-Name": APP_PROJECT,
         "X-Client-Code": CLIENT_CODE,
         "X-Client-Date": signed["client-date"],
